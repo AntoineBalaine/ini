@@ -84,10 +84,96 @@ pub fn Parser(comptime Reader: type) type {
     };
 }
 
+pub const State = enum { normal, section, key, value, comment };
+
 /// Returns a new parser that can read the ini structure
 pub fn parse(allocator: std.mem.Allocator, reader: anytype) Parser(@TypeOf(reader)) {
     return Parser(@TypeOf(reader)){
         .line_buffer = std.ArrayList(u8).init(allocator),
         .reader = reader,
     };
+}
+
+const StructError = error{
+    NotAStruct,
+};
+
+const truthyAndFalsy = std.StaticStringMap(bool).initComptime(.{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
+
+pub fn convert(comptime T: type, val: []const u8) !T {
+    return switch (@typeInfo(T)) {
+        .Int, .ComptimeInt => try std.fmt.parseInt(T, val, 0),
+        .Float, .ComptimeFloat => try std.fmt.parseFloat(T, val),
+        .Bool => truthyAndFalsy.get(val).?,
+        else => @as(T, val),
+    };
+}
+
+pub fn readToStruct(comptime T: type, parser: anytype) !T {
+    std.debug.assert(@typeInfo(T) == .Struct);
+    var cur_section: []const u8 = "";
+
+    const ret_struct = std.mem.zeroes(T);
+
+    while (try parser.next()) |record| {
+        switch (record) {
+            .section => |heading| {
+                cur_section = heading;
+            },
+            .property => |kv| {
+                const key = kv.key;
+                const value = kv.value;
+                inline for (std.meta.fields(T)) |ns_info| {
+                    // if we find the current section name
+                    if (std.mem.eql(u8, ns_info.name, cur_section)) {
+                        // @field(ret, ns_info.name) contains the inner struct now
+                        // loop over the fields of the inner struct, and check for key matches
+                        const innerStruct = @field(ret_struct, ns_info.name);
+                        inline for (std.meta.fields(@TypeOf(innerStruct))) |key_info| {
+                            const field_name = key_info.name;
+                            // if we find the current key
+                            if (std.mem.eql(u8, field_name, key)) {
+                                // now we have a key match, give it the value
+                                const my_type = @TypeOf(@field(innerStruct, field_name));
+                                @field(innerStruct, field_name) = try convert(my_type, value);
+                            }
+                        }
+                    }
+                }
+            },
+            .enumeration => |value| {
+                _ = value;
+            },
+        }
+    }
+    return ret_struct;
+}
+
+test readToStruct {
+    const expect = std.testing.expect;
+    const NewConfig = struct {
+        //
+        core: struct {
+            //
+            repositoryformatversion: isize,
+            filemode: bool,
+            bare: bool,
+            logallrefupdates: bool,
+        },
+    };
+    const example =
+        \\ [core]
+        \\ 	repositoryformatversion = 0
+        \\ 	filemode = true
+        \\ 	bare = false
+        \\ 	logallrefupdates = true
+    ;
+    var fbs = std.io.fixedBufferStream(example);
+    var parser = parse(std.testing.allocator, fbs.reader());
+    defer parser.deinit();
+    const result = try readToStruct(NewConfig, parser);
+    try expect(result.core.repositoryformatversion == 0);
+    try expect(result.core.filemode == true);
+    try expect(result.core.bare == false);
+    try expect(result.core.logallrefupdates == true);
 }
