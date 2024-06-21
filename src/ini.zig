@@ -97,16 +97,19 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype) Parser(@TypeOf(reade
 const StructError = error{
     NotAStruct,
 };
+const ConvertError = error{
+    NotConvertible,
+};
 
 // const truthyAndFalsy = std.StaticStringMap(bool).initComptime(.{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
 const truthyAndFalsy = std.ComptimeStringMap(bool, .{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
 
-pub fn convert(comptime T: type, val: []const u8) !T {
+pub fn convert(comptime T: type, val: []const u8) !?T {
     return switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => try std.fmt.parseInt(T, val, 0),
+        .Int, .ComptimeInt => try std.fmt.parseInt(T, val, 10),
         .Float, .ComptimeFloat => try std.fmt.parseFloat(T, val),
         .Bool => truthyAndFalsy.get(val).?,
-        else => @as(T, val),
+        else => null,
     };
 }
 
@@ -138,7 +141,9 @@ pub fn readToStruct(comptime T: type, parser: anytype) !T {
                                 // now we have a key match, give it the value
                                 const my_type = @TypeOf(@field(innerStruct, field_name));
                                 const conversion = try convert(my_type, value);
-                                @field(innerStruct, field_name) = conversion;
+                                if (conversion) |converted| {
+                                    @field(innerStruct, field_name) = converted;
+                                }
                             }
                         }
                     }
@@ -158,6 +163,13 @@ test truthyAndFalsy {
     try expect(truthyAndFalsy.get("false") == false);
     try expect(truthyAndFalsy.get("1") == true);
     try expect(truthyAndFalsy.get("0") == false);
+}
+test convert {
+    const expect = std.testing.expect;
+    const result = try convert(bool, "true");
+    if (result) |val| {
+        try expect(val == true);
+    }
 }
 
 test readToStruct {
