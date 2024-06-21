@@ -98,7 +98,8 @@ const StructError = error{
     NotAStruct,
 };
 
-const truthyAndFalsy = std.StaticStringMap(bool).initComptime(.{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
+// const truthyAndFalsy = std.StaticStringMap(bool).initComptime(.{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
+const truthyAndFalsy = std.ComptimeStringMap(bool, .{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
 
 pub fn convert(comptime T: type, val: []const u8) !T {
     return switch (@typeInfo(T)) {
@@ -115,7 +116,7 @@ pub fn readToStruct(comptime T: type, parser: anytype) !T {
 
     const ret_struct = std.mem.zeroes(T);
 
-    while (try parser.next()) |record| {
+    while (try parser.*.next()) |record| {
         switch (record) {
             .section => |heading| {
                 cur_section = heading;
@@ -128,14 +129,16 @@ pub fn readToStruct(comptime T: type, parser: anytype) !T {
                     if (std.mem.eql(u8, ns_info.name, cur_section)) {
                         // @field(ret, ns_info.name) contains the inner struct now
                         // loop over the fields of the inner struct, and check for key matches
-                        const innerStruct = @field(ret_struct, ns_info.name);
+                        var innerStruct = @field(ret_struct, ns_info.name);
                         inline for (std.meta.fields(@TypeOf(innerStruct))) |key_info| {
                             const field_name = key_info.name;
                             // if we find the current key
+
                             if (std.mem.eql(u8, field_name, key)) {
                                 // now we have a key match, give it the value
                                 const my_type = @TypeOf(@field(innerStruct, field_name));
-                                @field(innerStruct, field_name) = try convert(my_type, value);
+                                const conversion = try convert(my_type, value);
+                                @field(innerStruct, field_name) = conversion;
                             }
                         }
                     }
@@ -147,6 +150,14 @@ pub fn readToStruct(comptime T: type, parser: anytype) !T {
         }
     }
     return ret_struct;
+}
+
+test truthyAndFalsy {
+    const expect = std.testing.expect;
+    try expect(truthyAndFalsy.get("true") == true);
+    try expect(truthyAndFalsy.get("false") == false);
+    try expect(truthyAndFalsy.get("1") == true);
+    try expect(truthyAndFalsy.get("0") == false);
 }
 
 test readToStruct {
@@ -171,7 +182,7 @@ test readToStruct {
     var fbs = std.io.fixedBufferStream(example);
     var parser = parse(std.testing.allocator, fbs.reader());
     defer parser.deinit();
-    const result = try readToStruct(NewConfig, parser);
+    const result = try readToStruct(NewConfig, &parser);
     try expect(result.core.repositoryformatversion == 0);
     try expect(result.core.filemode == true);
     try expect(result.core.bare == false);
