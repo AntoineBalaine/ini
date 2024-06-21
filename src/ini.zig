@@ -113,30 +113,31 @@ pub fn convert(comptime T: type, val: []const u8) !?T {
     };
 }
 
-pub fn readToStruct(comptime T: type, parser: anytype) !T {
+pub fn readToStruct(comptime T: type, parser: anytype, allocator: std.mem.Allocator) !T {
     std.debug.assert(@typeInfo(T) == .Struct);
-    var cur_section: []const u8 = "";
+    var cur_section = std.ArrayList(u8).init(allocator);
+    defer cur_section.deinit();
 
     var ret_struct = std.mem.zeroes(T);
 
     while (try parser.*.next()) |record| {
         switch (record) {
             .section => |heading| {
-                cur_section = heading;
+                cur_section.clearRetainingCapacity();
+                try cur_section.appendSlice(heading);
             },
             .property => |kv| {
                 const key = kv.key;
                 const value = kv.value;
                 inline for (std.meta.fields(T)) |ns_info| {
                     // if we find the current section name
-                    if (std.mem.eql(u8, ns_info.name, cur_section)) {
+                    if (std.mem.eql(u8, ns_info.name, cur_section.items)) {
                         // @field(ret, ns_info.name) contains the inner struct now
                         // loop over the fields of the inner struct, and check for key matches
                         var innerStruct = &@field(ret_struct, ns_info.name); // err local var is never mutated
                         inline for (std.meta.fields(@TypeOf(innerStruct.*))) |key_info| {
                             const field_name = key_info.name;
                             // if we find the current key
-
                             if (std.mem.eql(u8, field_name, key)) {
                                 // now we have a key match, give it the value
                                 const my_type = @TypeOf(@field(innerStruct, field_name));
@@ -191,42 +192,13 @@ test readToStruct {
         \\ 	bare = false
         \\ 	logallrefupdates = true
     ;
+    const allocator = std.testing.allocator;
     var fbs = std.io.fixedBufferStream(example);
     var parser = parse(std.testing.allocator, fbs.reader());
     defer parser.deinit();
-    const result = try readToStruct(NewConfig, &parser);
+    const result = try readToStruct(NewConfig, &parser, allocator);
     try expect(result.core.repositoryformatversion == 0);
     try expect(result.core.filemode == true);
     try expect(result.core.bare == false);
     try expect(result.core.logallrefupdates == true);
-}
-
-pub fn main() !void {
-    const NewConfig = struct {
-        //
-        core: struct {
-            //
-            repositoryformatversion: isize,
-            filemode: bool,
-            bare: bool,
-            logallrefupdates: bool,
-        },
-    };
-    const example =
-        \\ [core]
-        \\ 	repositoryformatversion = 0
-        \\ 	filemode = true
-        \\ 	bare = false
-        \\ 	logallrefupdates = true
-    ;
-
-    std.debug.print("hello\n", .{});
-    var fbs = std.io.fixedBufferStream(example);
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer if (gpa.deinit() != .ok) @panic("memory leaked");
-
-    var parser = parse(gpa.allocator(), fbs.reader());
-    defer parser.deinit();
-    const result = try readToStruct(NewConfig, &parser);
-    _ = result; // autofix
 }
