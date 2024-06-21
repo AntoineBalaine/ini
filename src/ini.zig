@@ -117,7 +117,7 @@ pub fn readToStruct(comptime T: type, parser: anytype) !T {
     std.debug.assert(@typeInfo(T) == .Struct);
     var cur_section: []const u8 = "";
 
-    const ret_struct = std.mem.zeroes(T);
+    var ret_struct = std.mem.zeroes(T);
 
     while (try parser.*.next()) |record| {
         switch (record) {
@@ -132,8 +132,8 @@ pub fn readToStruct(comptime T: type, parser: anytype) !T {
                     if (std.mem.eql(u8, ns_info.name, cur_section)) {
                         // @field(ret, ns_info.name) contains the inner struct now
                         // loop over the fields of the inner struct, and check for key matches
-                        var innerStruct = @field(ret_struct, ns_info.name);
-                        inline for (std.meta.fields(@TypeOf(innerStruct))) |key_info| {
+                        var innerStruct = &@field(ret_struct, ns_info.name); // err local var is never mutated
+                        inline for (std.meta.fields(@TypeOf(innerStruct.*))) |key_info| {
                             const field_name = key_info.name;
                             // if we find the current key
 
@@ -199,4 +199,34 @@ test readToStruct {
     try expect(result.core.filemode == true);
     try expect(result.core.bare == false);
     try expect(result.core.logallrefupdates == true);
+}
+
+pub fn main() !void {
+    const NewConfig = struct {
+        //
+        core: struct {
+            //
+            repositoryformatversion: isize,
+            filemode: bool,
+            bare: bool,
+            logallrefupdates: bool,
+        },
+    };
+    const example =
+        \\ [core]
+        \\ 	repositoryformatversion = 0
+        \\ 	filemode = true
+        \\ 	bare = false
+        \\ 	logallrefupdates = true
+    ;
+
+    std.debug.print("hello\n", .{});
+    var fbs = std.io.fixedBufferStream(example);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer if (gpa.deinit() != .ok) @panic("memory leaked");
+
+    var parser = parse(gpa.allocator(), fbs.reader());
+    defer parser.deinit();
+    const result = try readToStruct(NewConfig, &parser);
+    _ = result; // autofix
 }
