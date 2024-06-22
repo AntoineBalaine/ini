@@ -115,12 +115,11 @@ pub fn convert(comptime T: type, val: []const u8) !?T {
     };
 }
 
-pub fn readToStruct(comptime T: type, parser: anytype, allocator: std.mem.Allocator) !T {
+pub fn readToStruct(ret_struct: anytype, parser: anytype, allocator: std.mem.Allocator) !@TypeOf(ret_struct) {
+    const T = @TypeOf(ret_struct.*);
     std.debug.assert(@typeInfo(T) == .Struct);
     var cur_section = std.ArrayList(u8).init(allocator);
     defer cur_section.deinit();
-
-    var ret_struct = std.mem.zeroes(T);
 
     while (try parser.*.next()) |record| {
         switch (record) {
@@ -153,7 +152,21 @@ pub fn readToStruct(comptime T: type, parser: anytype, allocator: std.mem.Alloca
                 }
             },
             .enumeration => |value| {
-                _ = value;
+                inline for (std.meta.fields(T)) |ns_info| {
+                    // if we find the current section name
+                    if (std.mem.eql(u8, ns_info.name, cur_section.items)) {
+                        // @field(ret, ns_info.name) contains the inner struct now
+                        var innerArray = &@field(ret_struct, ns_info.name);
+                        const X = @TypeOf(innerArray.*);
+                        if (X == std.ArrayList([]const u8) or X == std.ArrayList([]u8)) {
+                            const value_copy = try allocator.dupe(u8, value);
+                            try innerArray.append(value_copy);
+                        } else {
+                            std.debug.print("\nfailed\n", .{});
+                            return error.NotConvertible;
+                        }
+                    }
+                }
             },
         }
     }
@@ -202,7 +215,9 @@ test readToStruct {
     var fbs = std.io.fixedBufferStream(example);
     var parser = parse(std.testing.allocator, fbs.reader());
     defer parser.deinit();
-    const result = try readToStruct(NewConfig, &parser, allocator);
+
+    var ret_struct = std.mem.zeroes(NewConfig);
+    const result = try readToStruct(&ret_struct, &parser, allocator);
     try expect(result.core.repositoryformatversion == 0);
     try expect(result.core.filemode == true);
     try expect(result.core.bare == false);
@@ -241,7 +256,9 @@ test "nested structs" {
     var fbs2 = std.io.fixedBufferStream(example2);
     var parser2 = parse(std.testing.allocator, fbs2.reader());
     defer parser2.deinit();
-    const result2 = try readToStruct(Config2, &parser2, allocator);
+
+    var ret_struct = std.mem.zeroes(Config2);
+    const result2 = try readToStruct(&ret_struct, &parser2, allocator);
     try expect(result2.first.repositoryformatversion == 0);
     try expect(result2.first.filemode == true);
     try expect(result2.first.bare == false);
@@ -249,4 +266,85 @@ test "nested structs" {
     try expect(result2.second.second_thing1 == 1);
     try expect(result2.second.second_thing2 == false);
     try expect(std.mem.eql(u8, result2.second.second_thing3, "hello"));
+}
+
+test "nested array" {
+    const expect = std.testing.expect;
+    const allocator = std.testing.allocator;
+
+    const Config3 = struct {
+        second: std.ArrayList([]const u8),
+    };
+    const example3 =
+        \\ [second]
+        \\ 	hello
+        \\ 	world
+    ;
+    var fbs3 = std.io.fixedBufferStream(example3);
+    var parser3 = parse(std.testing.allocator, fbs3.reader());
+    defer parser3.deinit();
+    var ret_struct = Config3{
+        .second = std.ArrayList([]const u8).init(allocator),
+    };
+    const result3 = try readToStruct(&ret_struct, &parser3, allocator);
+    defer {
+        for (ret_struct.second.items) |item| {
+            allocator.free(item);
+        }
+        ret_struct.second.deinit();
+    }
+    try expect(std.mem.eql(u8, result3.second.items[0], "hello"));
+    try expect(std.mem.eql(u8, result3.second.items[1], "world"));
+}
+
+test "nested struct with array" {
+    const expect = std.testing.expect;
+    const allocator = std.testing.allocator;
+
+    const Config4 = struct {
+        first: struct {
+            //
+            repositoryformatversion: isize,
+            filemode: bool,
+            bare: bool,
+            logallrefupdates: bool,
+        },
+        second: std.ArrayList([]const u8),
+    };
+    const example4 =
+        \\ [first]
+        \\ 	repositoryformatversion = 0
+        \\ 	filemode = true
+        \\ 	bare = false
+        \\ 	logallrefupdates = true
+        \\ [second]
+        \\ 	hello
+        \\ 	world
+    ;
+    var fbs4 = std.io.fixedBufferStream(example4);
+    var parser4 = parse(std.testing.allocator, fbs4.reader());
+    defer parser4.deinit();
+
+    var ret_struct = Config4{
+        .first = .{
+            .repositoryformatversion = 0,
+            .filemode = true,
+            .bare = false,
+            .logallrefupdates = true,
+        },
+        .second = std.ArrayList([]const u8).init(allocator),
+    };
+    const result4 = try readToStruct(&ret_struct, &parser4, allocator);
+    defer {
+        for (ret_struct.second.items) |item| {
+            allocator.free(item);
+        }
+        ret_struct.second.deinit();
+    }
+    try expect(result4.first.repositoryformatversion == 0);
+    try expect(result4.first.filemode == true);
+    try expect(result4.first.bare == false);
+    try expect(result4.first.logallrefupdates == true);
+    try expect(std.mem.eql(u8, result4.second.items[0], "hello"));
+    try expect(std.mem.eql(u8, result4.second.items[1], "world"));
 }
