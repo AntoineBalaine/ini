@@ -84,10 +84,121 @@ pub fn Parser(comptime Reader: type) type {
     };
 }
 
+pub const State = enum { normal, section, key, value, comment };
+
 /// Returns a new parser that can read the ini structure
 pub fn parse(allocator: std.mem.Allocator, reader: anytype) Parser(@TypeOf(reader)) {
     return Parser(@TypeOf(reader)){
         .line_buffer = std.ArrayList(u8).init(allocator),
         .reader = reader,
     };
+}
+
+const StructError = error{
+    NotAStruct,
+};
+const ConvertError = error{
+    NotConvertible,
+};
+
+// const truthyAndFalsy = std.StaticStringMap(bool).initComptime(.{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
+const truthyAndFalsy = std.ComptimeStringMap(bool, .{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
+
+pub fn convert(comptime T: type, val: []const u8) !?T {
+    return switch (@typeInfo(T)) {
+        .Int, .ComptimeInt => try std.fmt.parseInt(T, val, 10),
+        .Float, .ComptimeFloat => try std.fmt.parseFloat(T, val),
+        .Bool => truthyAndFalsy.get(val).?,
+        else => null,
+    };
+}
+
+pub fn readToStruct(comptime T: type, parser: anytype, allocator: std.mem.Allocator) !T {
+    std.debug.assert(@typeInfo(T) == .Struct);
+    var cur_section = std.ArrayList(u8).init(allocator);
+    defer cur_section.deinit();
+
+    var ret_struct = std.mem.zeroes(T);
+
+    while (try parser.*.next()) |record| {
+        switch (record) {
+            .section => |heading| {
+                cur_section.clearRetainingCapacity();
+                try cur_section.appendSlice(heading);
+            },
+            .property => |kv| {
+                const key = kv.key;
+                const value = kv.value;
+                inline for (std.meta.fields(T)) |ns_info| {
+                    // if we find the current section name
+                    if (std.mem.eql(u8, ns_info.name, cur_section.items)) {
+                        // @field(ret, ns_info.name) contains the inner struct now
+                        // loop over the fields of the inner struct, and check for key matches
+                        var innerStruct = &@field(ret_struct, ns_info.name); // err local var is never mutated
+                        inline for (std.meta.fields(@TypeOf(innerStruct.*))) |key_info| {
+                            const field_name = key_info.name;
+                            // if we find the current key
+                            if (std.mem.eql(u8, field_name, key)) {
+                                // now we have a key match, give it the value
+                                const my_type = @TypeOf(@field(innerStruct, field_name));
+                                const conversion = try convert(my_type, value);
+                                if (conversion) |converted| {
+                                    @field(innerStruct, field_name) = converted;
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            .enumeration => |value| {
+                _ = value;
+            },
+        }
+    }
+    return ret_struct;
+}
+
+test truthyAndFalsy {
+    const expect = std.testing.expect;
+    try expect(truthyAndFalsy.get("true") == true);
+    try expect(truthyAndFalsy.get("false") == false);
+    try expect(truthyAndFalsy.get("1") == true);
+    try expect(truthyAndFalsy.get("0") == false);
+}
+test convert {
+    const expect = std.testing.expect;
+    const result = try convert(bool, "true");
+    if (result) |val| {
+        try expect(val == true);
+    }
+}
+
+test readToStruct {
+    const expect = std.testing.expect;
+    const NewConfig = struct {
+        //
+        core: struct {
+            //
+            repositoryformatversion: isize,
+            filemode: bool,
+            bare: bool,
+            logallrefupdates: bool,
+        },
+    };
+    const example =
+        \\ [core]
+        \\ 	repositoryformatversion = 0
+        \\ 	filemode = true
+        \\ 	bare = false
+        \\ 	logallrefupdates = true
+    ;
+    const allocator = std.testing.allocator;
+    var fbs = std.io.fixedBufferStream(example);
+    var parser = parse(std.testing.allocator, fbs.reader());
+    defer parser.deinit();
+    const result = try readToStruct(NewConfig, &parser, allocator);
+    try expect(result.core.repositoryformatversion == 0);
+    try expect(result.core.filemode == true);
+    try expect(result.core.bare == false);
+    try expect(result.core.logallrefupdates == true);
 }
