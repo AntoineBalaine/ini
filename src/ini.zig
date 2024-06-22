@@ -105,6 +105,8 @@ const ConvertError = error{
 const truthyAndFalsy = std.ComptimeStringMap(bool, .{ .{ "true", true }, .{ "false", false }, .{ "1", true }, .{ "0", false } });
 
 pub fn convert(comptime T: type, val: []const u8) !?T {
+    if (T == []const u8 or T == []u8) return @as([]const u8, val);
+
     return switch (@typeInfo(T)) {
         .Int, .ComptimeInt => try std.fmt.parseInt(T, val, 10),
         .Float, .ComptimeFloat => try std.fmt.parseFloat(T, val),
@@ -171,6 +173,10 @@ test convert {
     if (result) |val| {
         try expect(val == true);
     }
+    const result2 = try convert([]const u8, "123");
+    if (result2) |val2| {
+        try expect(std.mem.eql(u8, val2, "123"));
+    }
 }
 
 test readToStruct {
@@ -201,4 +207,46 @@ test readToStruct {
     try expect(result.core.filemode == true);
     try expect(result.core.bare == false);
     try expect(result.core.logallrefupdates == true);
+}
+
+test "nested structs" {
+    const expect = std.testing.expect;
+    const allocator = std.testing.allocator;
+
+    const Config2 = struct {
+        first: struct {
+            //
+            repositoryformatversion: isize,
+            filemode: bool,
+            bare: bool,
+            logallrefupdates: bool,
+        },
+        second: struct {
+            second_thing1: isize,
+            second_thing2: bool,
+            second_thing3: []const u8,
+        },
+    };
+    const example2 =
+        \\ [first]
+        \\ 	repositoryformatversion = 0
+        \\ 	filemode = true
+        \\ 	bare = false
+        \\ 	logallrefupdates = true
+        \\ [second]
+        \\ 	second_thing1 = 1
+        \\ 	second_thing2 = false
+        \\ 	second_thing3 = hello
+    ;
+    var fbs2 = std.io.fixedBufferStream(example2);
+    var parser2 = parse(std.testing.allocator, fbs2.reader());
+    defer parser2.deinit();
+    const result2 = try readToStruct(Config2, &parser2, allocator);
+    try expect(result2.first.repositoryformatversion == 0);
+    try expect(result2.first.filemode == true);
+    try expect(result2.first.bare == false);
+    try expect(result2.first.logallrefupdates == true);
+    try expect(result2.second.second_thing1 == 1);
+    try expect(result2.second.second_thing2 == false);
+    try expect(std.mem.eql(u8, result2.second.second_thing3, "hello"));
 }
