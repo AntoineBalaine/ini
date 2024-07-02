@@ -161,6 +161,9 @@ pub fn readToStruct(ret_struct: anytype, parser: anytype, allocator: std.mem.All
                         if (X == std.ArrayList([]const u8) or X == std.ArrayList([]u8)) {
                             const value_copy = try allocator.dupe(u8, value);
                             try innerArray.append(value_copy);
+                        } else if (X == std.StringHashMap(void)) {
+                            const value_copy = try allocator.dupe(u8, value);
+                            try innerArray.put(value_copy, {});
                         } else {
                             std.debug.print("\nfailed\n", .{});
                             return error.NotConvertible;
@@ -295,6 +298,37 @@ test "nested array" {
     }
     try expect(std.mem.eql(u8, result3.second.items[0], "hello"));
     try expect(std.mem.eql(u8, result3.second.items[1], "world"));
+}
+
+test "nested set" {
+    const expect = std.testing.expect;
+    const allocator = std.testing.allocator;
+    const config = struct {
+        first: std.StringHashMap(void),
+    };
+    const example =
+        \\ [first]
+        \\ 	hello
+        \\ 	world
+    ;
+    var ret_struct: config = .{
+        .first = std.StringHashMap(void).init(allocator),
+    };
+    var fbs = std.io.fixedBufferStream(example);
+    var parser = parse(std.testing.allocator, fbs.reader());
+    defer parser.deinit();
+
+    _ = try readToStruct(&ret_struct, &parser, allocator);
+    defer {
+        var iterator = ret_struct.first.iterator();
+        while (iterator.next()) |item| {
+            allocator.free(item.key_ptr.*);
+        }
+        ret_struct.first.deinit();
+    }
+
+    try expect(ret_struct.first.get("hello") != null);
+    try expect(ret_struct.first.get("world") != null);
 }
 
 test "nested struct with array" {
