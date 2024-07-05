@@ -477,3 +477,43 @@ test "nested struct with enum array" {
     try expect(std.mem.eql(u8, enum_arr.get(.two), "smth2"));
     try expect(std.mem.eql(u8, enum_arr.get(.three), "smth3"));
 }
+
+test "EnumArray(StringHashMap(void))" {
+    const myenum = enum {
+        ONE,
+        TWO,
+        THREE,
+    };
+    const expect = std.testing.expect;
+    const allocator = std.testing.allocator;
+    const example =
+        \\[ONE]
+        \\smth1: try/this
+        \\[TWO]
+        \\smth2
+        \\[THREE]
+        \\smth3
+    ;
+
+    var fbs = std.io.fixedBufferStream(example);
+    var parser = parse(std.testing.allocator, fbs.reader());
+    defer parser.deinit();
+
+    var enum_arr = std.EnumArray(myenum, std.StringHashMap(void)).init(.{
+        .ONE = std.StringHashMap(void).init(allocator),
+        .TWO = std.StringHashMap(void).init(allocator),
+        .THREE = std.StringHashMap(void).init(allocator),
+    });
+    _ = try readToEnumArray(&enum_arr, myenum, &parser, allocator);
+    defer {
+        inline for (std.meta.fields(myenum)) |f| {
+            var map = enum_arr.get(std.meta.stringToEnum(myenum, f.name).?);
+            var keyIter = map.keyIterator();
+            while (keyIter.next()) |key| {
+                allocator.free(key.*);
+            }
+            map.deinit();
+        }
+    }
+    try expect(enum_arr.get(.ONE).get("smth1: try/this") != null);
+}
