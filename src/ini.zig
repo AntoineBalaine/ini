@@ -144,7 +144,6 @@ pub fn readToEnumArray(enum_arr: anytype, Or_enum: type, parser: anytype, alloca
                     if (i != idx) {
                         continue;
                     }
-                    std.debug.print("in loop\n", .{});
 
                     const innerArray = enum_arr.get(cur_section.?);
                     const X = @TypeOf(innerArray);
@@ -157,11 +156,9 @@ pub fn readToEnumArray(enum_arr: anytype, Or_enum: type, parser: anytype, alloca
                         var inn = enum_arr.getPtr(cur_section.?);
                         try inn.put(value_copy, {});
                     } else if (X == []const u8) {
-                        std.debug.print("val: {s}\n", .{value});
                         const value_copy = try allocator.dupe(u8, value);
                         enum_arr.set(cur_section.?, value_copy);
                     } else {
-                        std.debug.print("\nfailed\n", .{});
                         return error.NotConvertible;
                     }
                 }
@@ -220,7 +217,6 @@ pub fn readToStruct(ret_struct: anytype, parser: anytype, allocator: std.mem.All
                             const value_copy = try allocator.dupe(u8, value);
                             try innerArray.put(value_copy, {});
                         } else {
-                            std.debug.print("\nfailed\n", .{});
                             return error.NotConvertible;
                         }
                     }
@@ -467,13 +463,7 @@ test "nested struct with enum array" {
             allocator.free(val);
         }
     }
-    expect(std.mem.eql(u8, enum_arr.get(.one), "smth1")) catch |err| {
-        std.debug.print(
-            "\n\n\n{s}\n\n\n",
-            .{enum_arr.get(.one)},
-        );
-        return err;
-    };
+    expect(std.mem.eql(u8, enum_arr.get(.one), "smth1"));
     try expect(std.mem.eql(u8, enum_arr.get(.two), "smth2"));
     try expect(std.mem.eql(u8, enum_arr.get(.three), "smth3"));
 }
