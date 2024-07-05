@@ -115,6 +115,61 @@ pub fn convert(comptime T: type, val: []const u8) !?T {
     };
 }
 
+pub fn readToEnumArray(enum_arr: anytype, Or_enum: type, parser: anytype, allocator: std.mem.Allocator) !void {
+    const T = @TypeOf(enum_arr.*);
+    std.debug.assert(@typeInfo(T) == .Struct);
+    std.debug.assert(@typeInfo(Or_enum) == .Enum);
+
+    // replace with parent enum
+    var cur_section: ?Or_enum = null;
+
+    while (try parser.*.next()) |record| {
+        switch (record) {
+            .section => |heading| {
+                // fit the enum
+                const head_val = std.meta.stringToEnum(Or_enum, heading);
+                if (head_val != null) {
+                    cur_section = head_val;
+                }
+            },
+            .property => {},
+            .enumeration => |value| {
+                var it = enum_arr.*.iterator();
+                var i: usize = 0;
+                while (it.next() != null) : (i += 1) {
+                    if (cur_section == null) {
+                        continue;
+                    }
+                    const idx = T.Indexer.indexOf(cur_section.?);
+                    if (i != idx) {
+                        continue;
+                    }
+                    std.debug.print("in loop\n", .{});
+
+                    const innerArray = enum_arr.get(cur_section.?);
+                    const X = @TypeOf(innerArray);
+                    if (X == std.ArrayList([]const u8) or X == std.ArrayList([]u8)) {
+                        const value_copy = try allocator.dupe(u8, value);
+                        var inn = enum_arr.getPtr(cur_section.?);
+                        try inn.append(value_copy);
+                    } else if (X == std.StringHashMap(void)) {
+                        const value_copy = try allocator.dupe(u8, value);
+                        var inn = enum_arr.getPtr(cur_section.?);
+                        try inn.put(value_copy, {});
+                    } else if (X == []const u8) {
+                        std.debug.print("val: {s}\n", .{value});
+                        const value_copy = try allocator.dupe(u8, value);
+                        enum_arr.set(cur_section.?, value_copy);
+                    } else {
+                        std.debug.print("\nfailed\n", .{});
+                        return error.NotConvertible;
+                    }
+                }
+            },
+        }
+    }
+}
+
 pub fn readToStruct(ret_struct: anytype, parser: anytype, allocator: std.mem.Allocator) !@TypeOf(ret_struct) {
     const T = @TypeOf(ret_struct.*);
     std.debug.assert(@typeInfo(T) == .Struct);
@@ -381,4 +436,44 @@ test "nested struct with array" {
     try expect(result4.first.logallrefupdates == true);
     try expect(std.mem.eql(u8, result4.second.items[0], "hello"));
     try expect(std.mem.eql(u8, result4.second.items[1], "world"));
+}
+
+test "nested struct with enum array" {
+    const myenum = enum {
+        one,
+        two,
+        three,
+    };
+    const expect = std.testing.expect;
+    const allocator = std.testing.allocator;
+    const example =
+        \\[one]
+        \\smth1
+        \\[two]
+        \\smth2
+        \\[three]
+        \\smth3
+    ;
+
+    var fbs = std.io.fixedBufferStream(example);
+    var parser = parse(std.testing.allocator, fbs.reader());
+    defer parser.deinit();
+
+    var enum_arr = std.EnumArray(myenum, []const u8).initUndefined();
+    _ = try readToEnumArray(&enum_arr, myenum, &parser, allocator);
+    defer {
+        inline for (std.meta.fields(myenum)) |f| {
+            const val = enum_arr.get(std.meta.stringToEnum(myenum, f.name).?);
+            allocator.free(val);
+        }
+    }
+    expect(std.mem.eql(u8, enum_arr.get(.one), "smth1")) catch |err| {
+        std.debug.print(
+            "\n\n\n{s}\n\n\n",
+            .{enum_arr.get(.one)},
+        );
+        return err;
+    };
+    try expect(std.mem.eql(u8, enum_arr.get(.two), "smth2"));
+    try expect(std.mem.eql(u8, enum_arr.get(.three), "smth3"));
 }
