@@ -149,12 +149,24 @@ pub fn readToEnumArray(enum_arr: anytype, Or_enum: type, parser: anytype, alloca
                     const X = @TypeOf(innerArray);
                     if (X == std.ArrayList([]const u8) or X == std.ArrayList([]u8)) {
                         const value_copy = try allocator.dupe(u8, value);
+                        errdefer {
+                            allocator.free(value_copy);
+                        }
                         var inn = enum_arr.getPtr(cur_section.?);
                         try inn.append(value_copy);
                     } else if (X == std.StringHashMap(void)) {
-                        const value_copy = try allocator.dupe(u8, value);
+                        var value_copy = try allocator.dupe(u8, value);
+                        errdefer {
+                            allocator.free(value_copy);
+                        }
                         var inn = enum_arr.getPtr(cur_section.?);
-                        try inn.put(value_copy, {});
+                        var result = try inn.getOrPut(value_copy);
+                        // don't over-write existing keys
+                        if (!result.found_existing) {
+                            result.key_ptr = &value_copy;
+                        } else {
+                            allocator.free(value_copy);
+                        }
                     } else if (X == []const u8) {
                         const value_copy = try allocator.dupe(u8, value);
                         enum_arr.set(cur_section.?, value_copy);
@@ -463,7 +475,7 @@ test "nested struct with enum array" {
             allocator.free(val);
         }
     }
-    expect(std.mem.eql(u8, enum_arr.get(.one), "smth1"));
+    try expect(std.mem.eql(u8, enum_arr.get(.one), "smth1"));
     try expect(std.mem.eql(u8, enum_arr.get(.two), "smth2"));
     try expect(std.mem.eql(u8, enum_arr.get(.three), "smth3"));
 }
