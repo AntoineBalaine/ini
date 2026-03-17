@@ -268,10 +268,10 @@ test readToStruct {
     };
     const example =
         \\ [core]
-        \\ 	repositoryformatversion = 0
-        \\ 	filemode = true
-        \\ 	bare = false
-        \\ 	logallrefupdates = true
+        \\  repositoryformatversion = 0
+        \\  filemode = true
+        \\  bare = false
+        \\  logallrefupdates = true
     ;
     const allocator = std.testing.allocator;
     var fbs = std.io.fixedBufferStream(example);
@@ -306,14 +306,14 @@ test "nested structs" {
     };
     const example2 =
         \\ [first]
-        \\ 	repositoryformatversion = 0
-        \\ 	filemode = true
-        \\ 	bare = false
-        \\ 	logallrefupdates = true
+        \\  repositoryformatversion = 0
+        \\  filemode = true
+        \\  bare = false
+        \\  logallrefupdates = true
         \\ [second]
-        \\ 	second_thing1 = 1
-        \\ 	second_thing2 = false
-        \\ 	second_thing3 = hello
+        \\  second_thing1 = 1
+        \\  second_thing2 = false
+        \\  second_thing3 = hello
     ;
     var fbs2 = std.io.fixedBufferStream(example2);
     var parser2 = parse(std.testing.allocator, fbs2.reader());
@@ -339,8 +339,8 @@ test "nested array" {
     };
     const example3 =
         \\ [second]
-        \\ 	hello
-        \\ 	world
+        \\  hello
+        \\  world
     ;
     var fbs3 = std.io.fixedBufferStream(example3);
     var parser3 = parse(std.testing.allocator, fbs3.reader());
@@ -367,8 +367,8 @@ test "nested set" {
     };
     const example =
         \\ [first]
-        \\ 	hello
-        \\ 	world
+        \\   hello
+        \\   world
     ;
     var ret_struct: config = .{
         .first = std.StringHashMap(void).init(allocator),
@@ -406,13 +406,13 @@ test "nested struct with array" {
     };
     const example4 =
         \\ [first]
-        \\ 	repositoryformatversion = 0
-        \\ 	filemode = true
-        \\ 	bare = false
-        \\ 	logallrefupdates = true
+        \\   repositoryformatversion = 0
+        \\   filemode = true
+        \\   bare = false
+        \\   logallrefupdates = true
         \\ [second]
-        \\ 	hello
-        \\ 	world
+        \\   hello
+        \\   world
     ;
     var fbs4 = std.io.fixedBufferStream(example4);
     var parser4 = parse(std.testing.allocator, fbs4.reader());
