@@ -48,7 +48,7 @@ pub fn Parser(comptime Reader: type) type {
 
         pub fn next(self: *Self) !?Record {
             while (true) {
-                self.reader.readUntilDelimiterArrayList(&self.line_buffer, '\n', 4096) catch |err| switch (err) {
+                self.reader.readUntilDelimiterArrayList(&self.line_buffer, '\n', 1024 * 1024) catch |err| switch (err) {
                     error.EndOfStream => {
                         if (self.line_buffer.items.len == 0)
                             return null;
