@@ -34,6 +34,65 @@ fn insertNulTerminator(slice: []const u8) [:0]const u8 {
     return mut_ptr[0..slice.len :0];
 }
 
+/// Strips a `;`/`#` comment from the line — but not when the comment
+/// character sits inside a double-quoted span, so keys and values that
+/// need literal `;`/`#` can be written quoted: `";" = SomeAction`.
+fn stripComment(line: []const u8) []const u8 {
+    var in_quotes = false;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (in_quotes and c == '\\' and i + 1 < line.len) {
+            i += 1; // skip the escaped character
+            continue;
+        }
+        if (c == '"') {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if (!in_quotes and (c == ';' or c == '#')) return line[0..i];
+    }
+    return line;
+}
+
+/// Finds the first `=` that is outside double quotes.
+fn indexOfUnquotedEquals(line: []const u8) ?usize {
+    var in_quotes = false;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (in_quotes and c == '\\' and i + 1 < line.len) {
+            i += 1;
+            continue;
+        }
+        if (c == '"') {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if (!in_quotes and c == '=') return i;
+    }
+    return null;
+}
+
+/// If the token is wrapped in double quotes, strips them and resolves the
+/// `\"` and `\\` escapes in place (the result is never longer than the
+/// input, and like insertNulTerminator this may only run on line_buffer
+/// slices).
+fn unquote(token: []const u8) []const u8 {
+    if (token.len < 2 or token[0] != '"' or token[token.len - 1] != '"') return token;
+    const inner = token[1 .. token.len - 1];
+    const mut_ptr = @as([*]u8, @ptrFromInt(@intFromPtr(inner.ptr)));
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < inner.len) : (i += 1) {
+        if (inner[i] == '\\' and i + 1 < inner.len and (inner[i + 1] == '"' or inner[i + 1] == '\\'))
+            i += 1;
+        mut_ptr[w] = inner[i];
+        w += 1;
+    }
+    return mut_ptr[0..w];
+}
+
 pub fn Parser(comptime Reader: type) type {
     return struct {
         const Self = @This();
@@ -57,10 +116,7 @@ pub fn Parser(comptime Reader: type) type {
                 };
                 try self.line_buffer.append(0); // append guaranteed space for sentinel
 
-                const line = if (std.mem.indexOfAny(u8, self.line_buffer.items, ";#")) |index|
-                    std.mem.trim(u8, self.line_buffer.items[0..index], whitespace)
-                else
-                    std.mem.trim(u8, self.line_buffer.items, whitespace);
+                const line = std.mem.trim(u8, stripComment(self.line_buffer.items), whitespace);
                 if (line.len == 0)
                     continue;
 
@@ -68,17 +124,23 @@ pub fn Parser(comptime Reader: type) type {
                     return Record{ .section = insertNulTerminator(line[1 .. line.len - 1]) };
                 }
 
-                if (std.mem.indexOfScalar(u8, line, '=')) |index| {
+                if (indexOfUnquotedEquals(line)) |index| {
+                    // note: compute both trims before unquoting — unquote and
+                    // the nul terminators mutate the buffer behind the slices.
+                    const raw_key = std.mem.trim(u8, line[0..index], whitespace);
+                    const raw_value = std.mem.trim(u8, line[index + 1 ..], whitespace);
+                    const value = unquote(raw_value);
+                    const key = unquote(raw_key);
                     return Record{
                         .property = KeyValue{
                             // note: the key *might* replace the '=' in the slice with 0!
-                            .key = insertNulTerminator(std.mem.trim(u8, line[0..index], whitespace)),
-                            .value = insertNulTerminator(std.mem.trim(u8, line[index + 1 ..], whitespace)),
+                            .key = insertNulTerminator(key),
+                            .value = insertNulTerminator(value),
                         },
                     };
                 }
 
-                return Record{ .enumeration = insertNulTerminator(line) };
+                return Record{ .enumeration = insertNulTerminator(unquote(line)) };
             }
         }
     };
@@ -108,17 +170,17 @@ pub fn convert(comptime T: type, val: []const u8) !?T {
     if (T == []const u8 or T == []u8) return @as([]const u8, val);
 
     return switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => try std.fmt.parseInt(T, val, 10),
-        .Float, .ComptimeFloat => try std.fmt.parseFloat(T, val),
-        .Bool => truthyAndFalsy.get(val).?,
+        .int, .comptime_int => try std.fmt.parseInt(T, val, 10),
+        .float, .comptime_float => try std.fmt.parseFloat(T, val),
+        .bool => truthyAndFalsy.get(val).?,
         else => null,
     };
 }
 
 pub fn readToEnumArray(enum_arr: anytype, Or_enum: type, parser: anytype, allocator: std.mem.Allocator, modulesList: ?*std.StringHashMap(Or_enum)) !void {
     const T = @TypeOf(enum_arr.*);
-    std.debug.assert(@typeInfo(T) == .Struct);
-    std.debug.assert(@typeInfo(Or_enum) == .Enum);
+    std.debug.assert(@typeInfo(T) == .@"struct");
+    std.debug.assert(@typeInfo(Or_enum) == .@"enum");
 
     // replace with parent enum
     var cur_section: ?Or_enum = null;
@@ -176,7 +238,7 @@ pub fn readToEnumArray(enum_arr: anytype, Or_enum: type, parser: anytype, alloca
 
 pub fn readToStruct(ret_struct: anytype, parser: anytype, allocator: std.mem.Allocator) !@TypeOf(ret_struct) {
     const T = @TypeOf(ret_struct.*);
-    std.debug.assert(@typeInfo(T) == .Struct);
+    std.debug.assert(@typeInfo(T) == .@"struct");
     var cur_section = std.ArrayList(u8).init(allocator);
     defer cur_section.deinit();
 
@@ -233,6 +295,50 @@ pub fn readToStruct(ret_struct: anytype, parser: anytype, allocator: std.mem.All
         }
     }
     return ret_struct;
+}
+
+test "quoted keys and values carry literal ; # and inline comments still strip" {
+    const expect = std.testing.expect;
+    const example =
+        \\[sec]
+        \\plain = value ; trailing comment
+        \\";" = SemiAction
+        \\"#" = HashAction # trailing comment too
+        \\"\"#1" = QuoteHash1
+        \\folder = "+recall #"
+        \\"a;b" = "c#d"
+    ;
+    var fbs = std.io.fixedBufferStream(example);
+    var parser = parse(std.testing.allocator, fbs.reader());
+    defer parser.deinit();
+
+    try expect((try parser.next()).? == .section);
+
+    const plain = (try parser.next()).?.property;
+    try expect(std.mem.eql(u8, plain.key, "plain"));
+    try expect(std.mem.eql(u8, plain.value, "value"));
+
+    const semi = (try parser.next()).?.property;
+    try expect(std.mem.eql(u8, semi.key, ";"));
+    try expect(std.mem.eql(u8, semi.value, "SemiAction"));
+
+    const hash = (try parser.next()).?.property;
+    try expect(std.mem.eql(u8, hash.key, "#"));
+    try expect(std.mem.eql(u8, hash.value, "HashAction"));
+
+    const qh = (try parser.next()).?.property;
+    try expect(std.mem.eql(u8, qh.key, "\"#1"));
+    try expect(std.mem.eql(u8, qh.value, "QuoteHash1"));
+
+    const folder = (try parser.next()).?.property;
+    try expect(std.mem.eql(u8, folder.key, "folder"));
+    try expect(std.mem.eql(u8, folder.value, "+recall #"));
+
+    const both = (try parser.next()).?.property;
+    try expect(std.mem.eql(u8, both.key, "a;b"));
+    try expect(std.mem.eql(u8, both.value, "c#d"));
+
+    try expect((try parser.next()) == null);
 }
 
 test truthyAndFalsy {
@@ -464,7 +570,7 @@ test "nested struct with enum array" {
     defer parser.deinit();
 
     var enum_arr = std.EnumArray(myenum, []const u8).initUndefined();
-    _ = try readToEnumArray(&enum_arr, myenum, &parser, allocator);
+    _ = try readToEnumArray(&enum_arr, myenum, &parser, allocator, null);
     defer {
         inline for (std.meta.fields(myenum)) |f| {
             const val = enum_arr.get(std.meta.stringToEnum(myenum, f.name).?);
