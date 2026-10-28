@@ -1,12 +1,9 @@
 const std = @import("std");
-
-const c = @cImport({
-    @cInclude("ini.h");
-});
+const c = @import("c");
 
 test "parser create/destroy" {
     var buffer: c.ini_Parser = undefined;
-    c.ini_create_buffer(&buffer, "", 0);
+    c.ini_create_buffer(&buffer, "", 0, "", 0);
     c.ini_destroy(&buffer);
 }
 
@@ -71,7 +68,7 @@ test "buffer parser" {
     ;
 
     var parser: c.ini_Parser = undefined;
-    c.ini_create_buffer(&parser, slice, slice.len);
+    c.ini_create_buffer(&parser, slice, slice.len, ";#", 2);
     defer c.ini_destroy(&parser);
 
     try commonTest(&parser);
@@ -82,7 +79,8 @@ test "file parser" {
     defer _ = c.fclose(file);
 
     var parser: c.ini_Parser = undefined;
-    c.ini_create_file(&parser, file);
+    var read_buffer: [1024]u8 = undefined;
+    c.ini_create_file(&parser, &read_buffer, read_buffer.len, file, ";#", 2);
     defer c.ini_destroy(&parser);
 
     try commonTest(&parser);

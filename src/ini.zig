@@ -34,27 +34,6 @@ fn insertNulTerminator(slice: []const u8) [:0]const u8 {
     return mut_ptr[0..slice.len :0];
 }
 
-/// Strips a `;`/`#` comment from the line — but not when the comment
-/// character sits inside a double-quoted span, so keys and values that
-/// need literal `;`/`#` can be written quoted: `";" = SomeAction`.
-fn stripComment(line: []const u8) []const u8 {
-    var in_quotes = false;
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (in_quotes and c == '\\' and i + 1 < line.len) {
-            i += 1; // skip the escaped character
-            continue;
-        }
-        if (c == '"') {
-            in_quotes = !in_quotes;
-            continue;
-        }
-        if (!in_quotes and (c == ';' or c == '#')) return line[0..i];
-    }
-    return line;
-}
-
 /// Finds the first `=` that is outside double quotes.
 fn indexOfUnquotedEquals(line: []const u8) ?usize {
     var in_quotes = false;
@@ -93,66 +72,110 @@ fn unquote(token: []const u8) []const u8 {
     return mut_ptr[0..w];
 }
 
-pub fn Parser(comptime Reader: type) type {
-    return struct {
-        const Self = @This();
+/// Lines longer than this are rejected with `error.StreamTooLong`.
+pub const max_line_length = 1024 * 1024;
 
-        line_buffer: std.ArrayList(u8),
-        reader: Reader,
+pub const Parser = struct {
+    const Self = @This();
 
-        pub fn deinit(self: *Self) void {
-            self.line_buffer.deinit();
-            self.* = undefined;
-        }
+    line_writer: std.Io.Writer.Allocating,
+    reader: *std.Io.Reader,
+    comment_characters: []const u8,
 
-        pub fn next(self: *Self) !?Record {
-            while (true) {
-                self.reader.readUntilDelimiterArrayList(&self.line_buffer, '\n', 1024 * 1024) catch |err| switch (err) {
-                    error.EndOfStream => {
-                        if (self.line_buffer.items.len == 0)
-                            return null;
-                    },
-                    else => |e| return e,
-                };
-                try self.line_buffer.append(0); // append guaranteed space for sentinel
+    pub fn deinit(self: *Self) void {
+        self.line_writer.deinit();
+        self.* = undefined;
+    }
 
-                const line = std.mem.trim(u8, stripComment(self.line_buffer.items), whitespace);
-                if (line.len == 0)
-                    continue;
-
-                if (std.mem.startsWith(u8, line, "[") and std.mem.endsWith(u8, line, "]")) {
-                    return Record{ .section = insertNulTerminator(line[1 .. line.len - 1]) };
-                }
-
-                if (indexOfUnquotedEquals(line)) |index| {
-                    // note: compute both trims before unquoting — unquote and
-                    // the nul terminators mutate the buffer behind the slices.
-                    const raw_key = std.mem.trim(u8, line[0..index], whitespace);
-                    const raw_value = std.mem.trim(u8, line[index + 1 ..], whitespace);
-                    const value = unquote(raw_value);
-                    const key = unquote(raw_key);
-                    return Record{
-                        .property = KeyValue{
-                            // note: the key *might* replace the '=' in the slice with 0!
-                            .key = insertNulTerminator(key),
-                            .value = insertNulTerminator(value),
-                        },
-                    };
-                }
-
-                return Record{ .enumeration = insertNulTerminator(unquote(line)) };
+    /// Strips a comment from the line held in the line buffer, and returns what remains of the line. A comment
+    /// character does not start a comment when it sits inside a double-quoted span, so that keys and values
+    /// that need a literal comment character can be written quoted: `";" = SomeAction`. Outside quotes, a
+    /// backslash before a comment character also makes it literal, and the backslash is removed from the line.
+    pub fn stripComment(self: *Self) []const u8 {
+        var in_quotes = false;
+        var i: usize = 0;
+        while (i < self.line_writer.written().len) {
+            const line = self.line_writer.written();
+            const c = line[i];
+            if (in_quotes and c == '\\' and i + 1 < line.len) {
+                // Because the backslash escapes the next character, we skip both.
+                i += 2;
+                continue;
             }
+            if (c == '"') {
+                in_quotes = !in_quotes;
+                i += 1;
+                continue;
+            }
+            if (in_quotes or std.mem.findScalar(u8, self.comment_characters, c) == null) {
+                i += 1;
+                continue;
+            }
+            if (i > 0 and line[i - 1] == '\\') {
+                // Because the removal of the backslash shifts the comment character to i - 1, the character
+                // that follows it is now at i, and it is the next one to look at.
+                @memmove(line[i - 1 .. line.len - 1], line[i..line.len]);
+                self.line_writer.shrinkRetainingCapacity(line.len - 1);
+                continue;
+            }
+            return line[0..i];
         }
-    };
-}
+        return self.line_writer.written();
+    }
+
+    pub fn next(self: *Self) !?Record {
+        while (true) {
+            self.line_writer.clearRetainingCapacity();
+            _ = try self.reader.streamDelimiterLimit(&self.line_writer.writer, '\n', .limited(max_line_length));
+
+            // Because streamDelimiterLimit leaves the delimiter in the reader, we discard it here. At the end
+            // of the stream there is no delimiter, and an empty line then means that there is nothing left.
+            const discarded = self.reader.discard(.limited(1)) catch |err| switch (err) {
+                error.EndOfStream => 0,
+                else => |e| return e,
+            };
+            if (self.line_writer.written().len == 0 and discarded == 0)
+                return null;
+            try self.line_writer.writer.writeByte(0); // append guaranteed space for sentinel
+
+            const line = std.mem.trim(u8, self.stripComment(), whitespace);
+            if (line.len == 0)
+                continue;
+
+            if (std.mem.startsWith(u8, line, "[") and std.mem.endsWith(u8, line, "]")) {
+                return Record{ .section = insertNulTerminator(line[1 .. line.len - 1]) };
+            }
+
+            if (indexOfUnquotedEquals(line)) |index| {
+                // note: compute both trims before unquoting — unquote and
+                // the nul terminators mutate the buffer behind the slices.
+                const raw_key = std.mem.trim(u8, line[0..index], whitespace);
+                const raw_value = std.mem.trim(u8, line[index + 1 ..], whitespace);
+                const value = unquote(raw_value);
+                const key = unquote(raw_key);
+                return Record{
+                    .property = KeyValue{
+                        // note: the key *might* replace the '=' in the slice with 0!
+                        .key = insertNulTerminator(key),
+                        .value = insertNulTerminator(value),
+                    },
+                };
+            }
+
+            return Record{ .enumeration = insertNulTerminator(unquote(line)) };
+        }
+    }
+};
 
 pub const State = enum { normal, section, key, value, comment };
 
-/// Returns a new parser that can read the ini structure
-pub fn parse(allocator: std.mem.Allocator, reader: anytype) Parser(@TypeOf(reader)) {
-    return Parser(@TypeOf(reader)){
-        .line_buffer = std.ArrayList(u8).init(allocator),
+/// Returns a new parser that can read the ini structure. Any character of
+/// `comment_characters` starts a comment, e.g. ";#".
+pub fn parse(allocator: std.mem.Allocator, reader: *std.Io.Reader, comment_characters: []const u8) Parser {
+    return Parser{
+        .line_writer = std.Io.Writer.Allocating.init(allocator),
         .reader = reader,
+        .comment_characters = comment_characters,
     };
 }
 
@@ -213,7 +236,7 @@ pub fn readToEnumArray(enum_arr: anytype, Or_enum: type, parser: anytype, alloca
                     if (X == std.ArrayList([]const u8) or X == std.ArrayList([]u8)) {
                         const value_copy = try allocator.dupe(u8, value);
                         var inn = enum_arr.getPtr(cur_section.?);
-                        try inn.append(value_copy);
+                        try inn.append(allocator, value_copy);
                     } else if (X == std.StringHashMap(void)) {
                         const value_copy = try allocator.dupe(u8, value);
                         var inn = enum_arr.getPtr(cur_section.?);
@@ -239,26 +262,25 @@ pub fn readToEnumArray(enum_arr: anytype, Or_enum: type, parser: anytype, alloca
 pub fn readToStruct(ret_struct: anytype, parser: anytype, allocator: std.mem.Allocator) !@TypeOf(ret_struct) {
     const T = @TypeOf(ret_struct.*);
     std.debug.assert(@typeInfo(T) == .@"struct");
-    var cur_section = std.ArrayList(u8).init(allocator);
-    defer cur_section.deinit();
+    var cur_section: std.ArrayList(u8) = .empty;
+    defer cur_section.deinit(allocator);
 
     while (try parser.*.next()) |record| {
         switch (record) {
             .section => |heading| {
                 cur_section.clearRetainingCapacity();
-                try cur_section.appendSlice(heading);
+                try cur_section.appendSlice(allocator, heading);
             },
             .property => |kv| {
                 const key = kv.key;
                 const value = kv.value;
-                inline for (std.meta.fields(T)) |ns_info| {
+                inline for (@typeInfo(T).@"struct".field_names) |ns_name| {
                     // if we find the current section name
-                    if (std.mem.eql(u8, ns_info.name, cur_section.items)) {
-                        // @field(ret, ns_info.name) contains the inner struct now
+                    if (std.mem.eql(u8, ns_name, cur_section.items)) {
+                        // @field(ret, ns_name) contains the inner struct now
                         // loop over the fields of the inner struct, and check for key matches
-                        var innerStruct = &@field(ret_struct, ns_info.name); // err local var is never mutated
-                        inline for (std.meta.fields(@TypeOf(innerStruct.*))) |key_info| {
-                            const field_name = key_info.name;
+                        var innerStruct = &@field(ret_struct, ns_name); // err local var is never mutated
+                        inline for (@typeInfo(@TypeOf(innerStruct.*)).@"struct".field_names) |field_name| {
                             // if we find the current key
                             if (std.mem.eql(u8, field_name, key)) {
                                 // now we have a key match, give it the value
@@ -273,15 +295,15 @@ pub fn readToStruct(ret_struct: anytype, parser: anytype, allocator: std.mem.All
                 }
             },
             .enumeration => |value| {
-                inline for (std.meta.fields(T)) |ns_info| {
+                inline for (@typeInfo(T).@"struct".field_names) |ns_name| {
                     // if we find the current section name
-                    if (std.mem.eql(u8, ns_info.name, cur_section.items)) {
-                        // @field(ret, ns_info.name) contains the inner struct now
-                        var innerArray = &@field(ret_struct, ns_info.name);
+                    if (std.mem.eql(u8, ns_name, cur_section.items)) {
+                        // @field(ret, ns_name) contains the inner struct now
+                        var innerArray = &@field(ret_struct, ns_name);
                         const X = @TypeOf(innerArray.*);
                         if (X == std.ArrayList([]const u8) or X == std.ArrayList([]u8)) {
                             const value_copy = try allocator.dupe(u8, value);
-                            try innerArray.append(value_copy);
+                            try innerArray.append(allocator, value_copy);
                         } else if (X == std.StringHashMap(void)) {
                             const value_copy = try allocator.dupe(u8, value);
                             try innerArray.put(value_copy, {});
@@ -308,8 +330,8 @@ test "quoted keys and values carry literal ; # and inline comments still strip" 
         \\folder = "+recall #"
         \\"a;b" = "c#d"
     ;
-    var fbs = std.io.fixedBufferStream(example);
-    var parser = parse(std.testing.allocator, fbs.reader());
+    var fbs: std.Io.Reader = .fixed(example);
+    var parser = parse(std.testing.allocator, &fbs, ";#");
     defer parser.deinit();
 
     try expect((try parser.next()).? == .section);
@@ -380,8 +402,8 @@ test readToStruct {
         \\  logallrefupdates = true
     ;
     const allocator = std.testing.allocator;
-    var fbs = std.io.fixedBufferStream(example);
-    var parser = parse(std.testing.allocator, fbs.reader());
+    var fbs: std.Io.Reader = .fixed(example);
+    var parser = parse(std.testing.allocator, &fbs, ";#");
     defer parser.deinit();
 
     var ret_struct = std.mem.zeroes(NewConfig);
@@ -421,8 +443,8 @@ test "nested structs" {
         \\  second_thing2 = false
         \\  second_thing3 = hello
     ;
-    var fbs2 = std.io.fixedBufferStream(example2);
-    var parser2 = parse(std.testing.allocator, fbs2.reader());
+    var fbs2: std.Io.Reader = .fixed(example2);
+    var parser2 = parse(std.testing.allocator, &fbs2, ";#");
     defer parser2.deinit();
 
     var ret_struct = std.mem.zeroes(Config2);
@@ -448,18 +470,18 @@ test "nested array" {
         \\  hello
         \\  world
     ;
-    var fbs3 = std.io.fixedBufferStream(example3);
-    var parser3 = parse(std.testing.allocator, fbs3.reader());
+    var fbs3: std.Io.Reader = .fixed(example3);
+    var parser3 = parse(std.testing.allocator, &fbs3, ";#");
     defer parser3.deinit();
     var ret_struct = Config3{
-        .second = std.ArrayList([]const u8).init(allocator),
+        .second = .empty,
     };
     const result3 = try readToStruct(&ret_struct, &parser3, allocator);
     defer {
         for (ret_struct.second.items) |item| {
             allocator.free(item);
         }
-        ret_struct.second.deinit();
+        ret_struct.second.deinit(allocator);
     }
     try expect(std.mem.eql(u8, result3.second.items[0], "hello"));
     try expect(std.mem.eql(u8, result3.second.items[1], "world"));
@@ -479,8 +501,8 @@ test "nested set" {
     var ret_struct: config = .{
         .first = std.StringHashMap(void).init(allocator),
     };
-    var fbs = std.io.fixedBufferStream(example);
-    var parser = parse(std.testing.allocator, fbs.reader());
+    var fbs: std.Io.Reader = .fixed(example);
+    var parser = parse(std.testing.allocator, &fbs, ";#");
     defer parser.deinit();
 
     _ = try readToStruct(&ret_struct, &parser, allocator);
@@ -520,8 +542,8 @@ test "nested struct with array" {
         \\   hello
         \\   world
     ;
-    var fbs4 = std.io.fixedBufferStream(example4);
-    var parser4 = parse(std.testing.allocator, fbs4.reader());
+    var fbs4: std.Io.Reader = .fixed(example4);
+    var parser4 = parse(std.testing.allocator, &fbs4, ";#");
     defer parser4.deinit();
 
     var ret_struct = Config4{
@@ -531,14 +553,14 @@ test "nested struct with array" {
             .bare = false,
             .logallrefupdates = true,
         },
-        .second = std.ArrayList([]const u8).init(allocator),
+        .second = .empty,
     };
     const result4 = try readToStruct(&ret_struct, &parser4, allocator);
     defer {
         for (ret_struct.second.items) |item| {
             allocator.free(item);
         }
-        ret_struct.second.deinit();
+        ret_struct.second.deinit(allocator);
     }
     try expect(result4.first.repositoryformatversion == 0);
     try expect(result4.first.filemode == true);
@@ -565,15 +587,15 @@ test "nested struct with enum array" {
         \\smth3
     ;
 
-    var fbs = std.io.fixedBufferStream(example);
-    var parser = parse(std.testing.allocator, fbs.reader());
+    var fbs: std.Io.Reader = .fixed(example);
+    var parser = parse(std.testing.allocator, &fbs, ";#");
     defer parser.deinit();
 
     var enum_arr = std.EnumArray(myenum, []const u8).initUndefined();
     _ = try readToEnumArray(&enum_arr, myenum, &parser, allocator, null);
     defer {
-        inline for (std.meta.fields(myenum)) |f| {
-            const val = enum_arr.get(std.meta.stringToEnum(myenum, f.name).?);
+        inline for (@typeInfo(myenum).@"enum".field_names) |name| {
+            const val = enum_arr.get(std.meta.stringToEnum(myenum, name).?);
             allocator.free(val);
         }
     }

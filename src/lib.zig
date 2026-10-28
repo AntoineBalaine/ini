@@ -1,9 +1,6 @@
 const std = @import("std");
 const ini = @import("ini.zig");
-
-const c = @cImport({
-    @cInclude("ini.h");
-});
+const c = @import("c");
 
 const Record = extern struct {
     type: Type,
@@ -29,13 +26,18 @@ const Record = extern struct {
 };
 
 const BufferParser = struct {
-    stream: std.io.FixedBufferStream([]const u8),
-    parser: ini.Parser(std.io.FixedBufferStream([]const u8).Reader),
+    stream: std.Io.Reader,
+    parser: ini.Parser,
+};
+
+const FileParser = struct {
+    reader: CReader,
+    parser: ini.Parser,
 };
 
 const IniParser = union(enum) {
     buffer: BufferParser,
-    file: ini.Parser(CReader),
+    file: FileParser,
 };
 
 const IniError = enum(c.ini_Error) {
@@ -62,32 +64,37 @@ comptime {
         @compileError("align mismatch: ini_KeyValuePair struct does not match Record.KeyValuePair!");
 }
 
-export fn ini_create_buffer(parser: *IniParser, data: [*]const u8, length: usize) void {
+export fn ini_create_buffer(parser: *IniParser, data: [*]const u8, data_length: usize, comment_characters: [*]const u8, comment_characters_length: usize) void {
     parser.* = IniParser{
         .buffer = .{
-            .stream = std.io.fixedBufferStream(data[0..length]),
+            .stream = std.Io.Reader.fixed(data[0..data_length]),
             .parser = undefined,
         },
     };
     // this is required to have the parser store a pointer to the stream.
-    parser.buffer.parser = ini.parse(std.heap.c_allocator, parser.buffer.stream.reader());
+    parser.buffer.parser = ini.parse(std.heap.c_allocator, &parser.buffer.stream, comment_characters[0..comment_characters_length]);
 }
 
-export fn ini_create_file(parser: *IniParser, file: *std.c.FILE) void {
+export fn ini_create_file(parser: *IniParser, read_buffer: [*]u8, read_buffer_length: usize, file: *std.c.FILE, comment_characters: [*]const u8, comment_characters_length: usize) void {
     parser.* = IniParser{
-        .file = ini.parse(std.heap.c_allocator, cReader(file)),
+        .file = .{
+            .reader = CReader.init(file, read_buffer[0..read_buffer_length]),
+            .parser = undefined,
+        },
     };
+
+    parser.file.parser = ini.parse(std.heap.c_allocator, &parser.file.reader.interface, comment_characters[0..comment_characters_length]);
 }
 
 export fn ini_destroy(parser: *IniParser) void {
     switch (parser.*) {
         .buffer => |*p| p.parser.deinit(),
-        .file => |*p| p.deinit(),
+        .file => |*p| p.parser.deinit(),
     }
     parser.* = undefined;
 }
 
-const ParseError = error{ OutOfMemory, StreamTooLong } || CReader.Error;
+const ParseError = error{ OutOfMemory, StreamTooLong } || std.Io.Reader.Error || std.Io.Writer.Error;
 
 fn mapError(err: ParseError) IniError {
     return switch (err) {
@@ -100,7 +107,7 @@ fn mapError(err: ParseError) IniError {
 export fn ini_next(parser: *IniParser, record: *Record) IniError {
     const src_record_or_null: ?ini.Record = switch (parser.*) {
         .buffer => |*p| p.parser.next() catch |e| return mapError(e),
-        .file => |*p| p.next() catch |e| return mapError(e),
+        .file => |*p| p.parser.next() catch |e| return mapError(e),
     };
 
     if (src_record_or_null) |src_record| {
@@ -131,28 +138,37 @@ export fn ini_next(parser: *IniParser, record: *Record) IniError {
     return .success;
 }
 
-const CReader = std.io.Reader(*std.c.FILE, std.fs.File.ReadError, cReaderRead);
+extern "c" fn feof(stream: *std.c.FILE) c_int;
 
-fn cReader(c_file: *std.c.FILE) CReader {
-    return .{ .context = c_file };
-}
+const CReader = struct {
+    file: *std.c.FILE,
+    interface: std.Io.Reader,
 
-fn cReaderRead(c_file: *std.c.FILE, bytes: []u8) std.fs.File.ReadError!usize {
-    const amt_read = std.c.fread(bytes.ptr, 1, bytes.len, c_file);
-    if (amt_read >= 0) return amt_read;
-    switch (@as(std.os.E, @enumFromInt(std.c._errno().*))) {
-        .SUCCESS => unreachable,
-        .INVAL => unreachable,
-        .FAULT => unreachable,
-        .AGAIN => unreachable, // this is a blocking API
-        .BADF => unreachable, // always a race condition
-        .DESTADDRREQ => unreachable, // connect was never called
-        .DQUOT => return error.DiskQuota,
-        .FBIG => return error.FileTooBig,
-        .IO => return error.InputOutput,
-        .NOSPC => return error.NoSpaceLeft,
-        .PERM => return error.AccessDenied,
-        .PIPE => return error.BrokenPipe,
-        else => |err| return std.os.unexpectedErrno(err),
+    fn init(file: *std.c.FILE, buffer: []u8) CReader {
+        return .{
+            .file = file,
+            .interface = .{
+                .vtable = &.{ .stream = stream },
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
     }
-}
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const creader: *CReader = @alignCast(@fieldParentPtr("interface", r));
+
+        if (limit == .nothing) return 0;
+        const dest = limit.slice(try w.writableSliceGreedy(1));
+
+        const n = std.c.fread(dest.ptr, 1, dest.len, creader.file);
+        if (n > 0) {
+            w.advance(n);
+            return n;
+        }
+
+        if (feof(creader.file) != 0) return error.EndOfStream;
+        return error.ReadFailed;
+    }
+};

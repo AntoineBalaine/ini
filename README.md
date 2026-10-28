@@ -3,7 +3,7 @@
 This is a very simple ini-parser library that provides:
 - Raw record reading
 - Leading/trailing whitespace removal
-- comments based on `;` and `#`
+- Comments
 - Zig API
 - C API
 
@@ -12,17 +12,20 @@ This is a very simple ini-parser library that provides:
 ### Zig 
 
 ```zig
-const std = @import("std");
-const ini = @import("ini");
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const file = try std.Io.Dir.cwd().openFile(io, "example.ini", .{});
+    defer file.close(io);
 
-pub fn main() !void {
-    const file = try std.fs.cwd().openFile("example.ini", .{});
-    defer file.close();
-
-    var parser = ini.parse(std.testing.allocator, file.reader());
+    var read_buffer: [1024]u8 = undefined;
+    var file_reader = file.reader(io, &read_buffer);
+    var parser = ini.parse(init.gpa, &file_reader.interface, ";#");
     defer parser.deinit();
 
-    var writer = std.io.getStdOut().writer();
+    var write_buffer: [1024]u8 = undefined;
+    var file_writer = std.Io.File.stdout().writer(io, &write_buffer);
+    const writer = &file_writer.interface;
+    defer writer.flush() catch @panic("Could not flush to stdout");
 
     while (try parser.next()) |record| {
         switch (record) {
@@ -31,8 +34,7 @@ pub fn main() !void {
             .enumeration => |value| try writer.print("{s}\n", .{value}),
         }
     }
-}
-```
+}```
 
 ### C
 
@@ -43,12 +45,13 @@ pub fn main() !void {
 #include <stdbool.h>
 
 int main() {
-  FILE * f = fopen("example.ini", "rb");
+  FILE * f = fopen("example.ini", "r");
   if(!f)
     return 1;
-  
+
   struct ini_Parser parser;
-  ini_create_file(&parser, f);
+  char read_buffer[1024] = {0};
+  ini_create_file(&parser, read_buffer, sizeof read_buffer, f, ";#", 2);
 
   struct ini_Record record;
   while(true)
@@ -56,7 +59,7 @@ int main() {
     enum ini_Error error = ini_next(&parser, &record);
     if(error != INI_SUCCESS)
       goto cleanup;
-    
+
     switch(record.type) {
       case INI_RECORD_NUL: goto done;
       case INI_RECORD_SECTION:

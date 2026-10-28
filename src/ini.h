@@ -11,7 +11,7 @@
 /// after being initialized with `ini_create_*`!
 struct ini_Parser
 {
-  alignas(16) char opaque[128];
+  alignas(16) char opaque[256];
 };
 
 enum ini_RecordType : int
@@ -49,12 +49,18 @@ enum ini_Error
 extern void ini_create_buffer(
   struct ini_Parser  * parser,
   char const * data,
-  size_t length
+  size_t data_length,
+  char const * comment_characters,
+  size_t comment_characters_length
 );
 
 extern void ini_create_file(
   struct ini_Parser  * parser,
-  FILE * file
+  char * read_buffer,
+  size_t read_buffer_length,
+  FILE * file,
+  char const * comment_characters,
+  size_t comment_characters_length
 );
 
 extern void ini_destroy(struct ini_Parser  * parser);
